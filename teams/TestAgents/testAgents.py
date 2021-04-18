@@ -11,7 +11,7 @@ from captureAgents import CaptureAgent
 from captureAgents import AgentFactory
 import distanceCalculator
 import random, time, util
-from game import Directions
+from game import Configuration, Directions
 import keyboardAgents
 import game
 from util import nearestPoint
@@ -97,8 +97,8 @@ class ReflexCaptureAgent(CaptureAgent, object):
       # intialize particle filter
       self.particles = {}
       self.numParticles = 200
-      for o in self.getOpponents(gameState):
-        self.initializeParticles(o)
+      self.depth = 1
+      self.initializeParticles(gameState)
 
   def chooseAction(self, gameState):
     """
@@ -114,13 +114,16 @@ class ReflexCaptureAgent(CaptureAgent, object):
     self.displayDistributionsOverPositions(beliefs)
     self.elapseTime(gameState)
     self.beliefMLP = {o: beliefs[o].argMax() for o in self.getOpponents(gameState)}
+    """ alteredState = gameState.deepCopy()
+    for o, pos in self.beliefMLP.items():
+      alteredState.data.agentStates[o].configuration = Configuration(pos, None) """
     values = [self.evaluate(gameState, a) for a in actions]
     # print 'eval time for agent %d: %.4f' % (self.index, time.time() - start)
 
     maxValue = max(values)
     bestActions = [a for a, v in zip(actions, values) if v == maxValue]
     return random.choice(bestActions)
-
+    """ return self.expectimax(alteredState,0,0) """
   def getSuccessor(self, gameState, action):
     """
     Finds the next successor which is a grid position (location tuple).
@@ -156,8 +159,15 @@ class ReflexCaptureAgent(CaptureAgent, object):
     a counter or a dictionary.
     """
     return {'successorScore': 1.0}
-  
-  def initializeParticles(self, opponent):
+
+  def initializeParticles(self, gameState):
+    for o in self.getOpponents(gameState):
+      particles = []
+      for i in range(self.numParticles):
+        particles.append(gameState.getInitialAgentPosition(o))
+      self.particles[o] = particles
+
+  def initializeParticlesUniformally(self, opponent):
     particles = []
     random.shuffle(self.legalPos)
     for i in range(self.numParticles):
@@ -175,13 +185,16 @@ class ReflexCaptureAgent(CaptureAgent, object):
       if not agentPositions[o] is None:
         for i in range(self.numParticles):
           self.particles[o][i] = agentPositions[o]
+      elif noisyDistances[o] is None:
+        for i in range(self.numParticles):
+          self.particles[o][i] = gameState.getInitialAgentPosition(o)
       else:
         weights = util.Counter()
         for particle in self.particles[o]:
           trueDistance = util.manhattanDistance(myPos, particle)
           weights[particle] += gameState.getDistanceProb(trueDistance, noisyDistances[o])
         if weights.totalCount() <= 0:
-          self.initializeParticles(o)
+          self.initializeParticlesUniformally(o)
         else:
           weights.normalize()
           for i in range(self.numParticles):
@@ -234,6 +247,33 @@ class ReflexCaptureAgent(CaptureAgent, object):
         beliefs.append(None)
     return beliefs
 
+  def expectimax(self, gameState, depth, index):
+    indexTable =[self.index]+self.getOpponents(gameState)
+    index %= len(indexTable)
+    agent = indexTable[index]
+    # max depth return
+    if depth == self.depth:
+      return self.evaluate(gameState)
+    # possible actions
+    actions = gameState.getLegalActions(agent)
+    # if at terminating state return
+    if len(actions) == 0:
+      return self.evaluate(gameState)
+    # calculate next depth
+    nextDepth = depth if not index == len(indexTable) - 1 else depth + 1
+    # expectimax of all actions
+    expectimaxActions = [self.expectimax(gameState.generateSuccessor(agent, a), nextDepth, index+1) for a in actions]
+    # pacman (max state)
+    if agent == self.index:
+      # get index of action with max expectimax
+      maxArg = max(range(len(actions)), key= lambda i: expectimaxActions[i])
+      # if at starting of recursion then return action
+      if(depth == 0):
+        return actions[maxArg]
+      # for recursion return max
+      return expectimaxActions[maxArg]
+    # chance node (ghost) return sum of weighted utilty of each action (In this case they are equally likely so just return avg)
+    return float(sum(expectimaxActions))/float(len(expectimaxActions))
 
 
 class OffensiveReflexAgent(ReflexCaptureAgent):
@@ -253,17 +293,37 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
       myPos = successor.getAgentState(self.index).getPosition()
       minDistance = min([self.getMazeDistance(myPos, food) for food in foodList])
       features['distanceToFood'] = minDistance
+    
+    # food left
+    features['foodLeft'] = len(foodList)
 
+    # distance to nearest not-scared ghost
     enemies = [(i,successor.getAgentState(i)) for i in self.getOpponents(successor)]
-    ghosts = [(i, a) for i, a in enemies if not a.isPacman]
+    ghosts = [(i, a) for i, a in enemies if (not a.isPacman) and a.scaredTimer <= 0]
     if len(ghosts) > 0:
       dists = [self.getMazeDistance(myPos, self.beliefMLP[i]) for i, a in ghosts]
       distanceToOpponent = min(dists)
-    features['distanceToOpponent'] = float('-inf') if distanceToOpponent == 0 else 1.0/distanceToOpponent
+      features['distanceToOpponent'] = float('-inf') if distanceToOpponent == 0 else 1.0/distanceToOpponent
+
+    # number of power pellets
+    powerPellets = None
+    if self.red:
+      powerPellets = successor.getBlueCapsules()
+    else:
+      powerPellets = successor.getRedCapsules()
+    features['powerPelletsLeft'] = len(powerPellets)
+
+    # distance to scared ghost
+    scaredGhosts = [(i, a) for i, a in enemies if (not a.isPacman) and a.scaredTimer > 0]
+    if len(scaredGhosts) > 0:
+      dists = [self.getMazeDistance(myPos, self.beliefMLP[i]) for i, a in scaredGhosts]
+      distanceToGhost = min(dists)
+      features['distanceToScared'] = distanceToGhost
+    
     return features
 
   def getWeights(self, gameState, action):
-    return {'successorScore': 100, 'distanceToFood': -4, 'distanceToOpponent':-5}
+    return {'successorScore': 100, 'distanceToFood': -4, 'distanceToOpponent':-5, 'foodLeft': -1, 'powerPelletsLeft': -100, 'distanceToScared': -1}
 
 
 class DefensiveReflexAgent(ReflexCaptureAgent):
