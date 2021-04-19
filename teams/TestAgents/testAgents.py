@@ -6,6 +6,7 @@
 # John DeNero (denero@cs.berkeley.edu) and Dan Klein (klein@cs.berkeley.edu).
 # For more info, see http://inst.eecs.berkeley.edu/~cs188/sp09/pacman.html
 
+from os import stat
 from capture import GameState, noisyDistance
 from captureAgents import CaptureAgent
 from captureAgents import AgentFactory
@@ -101,64 +102,61 @@ class ReflexCaptureAgent(CaptureAgent, object):
       self.initializeParticles(gameState)
 
   def chooseAction(self, gameState):
-    """
-    Picks among the actions with the highest Q(s,a).
-    """
-    actions = gameState.getLegalActions(self.index)
 
     # You can profile your evaluation time by uncommenting these lines
     # start = time.time()
-    # distance to nearest Ghost
-    self.observeState(gameState)
-    beliefs = self.getBeliefDistribution(gameState)
-    self.displayDistributionsOverPositions(beliefs)
-    self.elapseTime(gameState)
-    self.beliefMLP = {o: beliefs[o].argMax() for o in self.getOpponents(gameState)}
-    """ alteredState = gameState.deepCopy()
-    for o, pos in self.beliefMLP.items():
-      alteredState.data.agentStates[o].configuration = Configuration(pos, None) """
-    values = [self.evaluate(gameState, a) for a in actions]
-    # print 'eval time for agent %d: %.4f' % (self.index, time.time() - start)
 
-    maxValue = max(values)
-    bestActions = [a for a, v in zip(actions, values) if v == maxValue]
-    return random.choice(bestActions)
-    """ return self.expectimax(alteredState,0,0) """
-  def getSuccessor(self, gameState, action):
+    # particle filter updates
+    self.elapseTime(gameState)
+    self.observeState(gameState)
+    self.getBeliefDistribution(gameState)
+    self.displayDistributionsOverPositions(self.beliefs)
+
+    # generate the most likely position of every opponent
+    self.getMLP(gameState)
+
+    # alter gamestate to include opponents in the most likely positions
+    alteredState = gameState.deepCopy()
+    for o in self.getOpponents(gameState):
+      alteredState.data.agentStates[o].configuration = Configuration(self.beliefMLP[o], None)
+
+    # run expecitmax on the altered state
+    return self.expectimax(alteredState,0,0)
+
+  def getSuccessor(self, gameState, index, action):
     """
     Finds the next successor which is a grid position (location tuple).
     """
-    successor = gameState.generateSuccessor(self.index, action)
-    pos = successor.getAgentState(self.index).getPosition()
+    successor = gameState.generateSuccessor(index, action)
+    pos = successor.getAgentState(index).getPosition()
     if pos != nearestPoint(pos):
       # Only half a grid position was covered
-      return successor.generateSuccessor(self.index, action)
+      return successor.generateSuccessor(index, action)
     else:
       return successor
 
-  def evaluate(self, gameState, action):
+  def evaluate(self, gameState):
     """
     Computes a linear combination of features and feature weights
     """
-    features = self.getFeatures(gameState, action)
-    weights = self.getWeights(gameState, action)
+    features = self.getFeatures(gameState)
+    weights = self.getWeights(gameState)
     return features * weights
 
-  def getFeatures(self, gameState, action):
+  def getFeatures(self, gameState):
     """
     Returns a counter of features for the state
     """
     features = util.Counter()
-    successor = self.getSuccessor(gameState, action)
-    features['successorScore'] = self.getScore(successor)
+    features['score'] = self.getScore(gameState)
     return features
 
-  def getWeights(self, gameState, action):
+  def getWeights(self, gameState):
     """
     Normally, weights do not depend on the gamestate.  They can be either
     a counter or a dictionary.
     """
-    return {'successorScore': 1.0}
+    return {'score': 1.0}
 
   def initializeParticles(self, gameState):
     for o in self.getOpponents(gameState):
@@ -202,34 +200,19 @@ class ReflexCaptureAgent(CaptureAgent, object):
         
     
   def elapseTime(self, gameState):
+    alteredState = gameState.deepCopy()
     opponents = self.getOpponents(gameState)
     for o in opponents:
       newParticles = []
       for oldParticle in self.particles[o]:
           pos = oldParticle
           newPosDist = util.Counter()
-          #stay
-          newPosDist[pos] += 1
-          # up
-          if (pos[0], pos[1]+1) in self.legalPos:
-            newPosDist[(pos[0], pos[1]+1)] += 1
-          else:
-            newPosDist[pos] +=1
-          # down
-          if (pos[0], pos[1]-1) in self.legalPos:
-            newPosDist[(pos[0], pos[1]-1)] += 1
-          else:
-            newPosDist[pos] +=1
-          # left
-          if (pos[0]-1, pos[1]) in self.legalPos:
-            newPosDist[(pos[0]-1, pos[1])] += 1
-          else:
-            newPosDist[pos] +=1
-          # right
-          if (pos[0]+1, pos[1]) in self.legalPos:
-            newPosDist[(pos[0]+1, pos[1])] += 1
-          else:
-            newPosDist[pos] +=1
+          alteredState.data.agentStates[o].configuration = Configuration(pos, None)
+          actions = alteredState.getLegalActions(o)
+          states = [self.getSuccessor(alteredState, o, a) for a in actions]
+          for state in states:
+            newPos = state.data.agentStates[o].configuration.pos
+            newPosDist[newPos] += 1
           newPosDist.normalize()
           newParticles.append(util.sampleFromCounter(newPosDist))
       self.particles[o] = newParticles
@@ -237,15 +220,21 @@ class ReflexCaptureAgent(CaptureAgent, object):
   def getBeliefDistribution(self, gameState):
     beliefs = []
     for i in range(gameState.getNumAgents()):
+      belief = util.Counter()
       if i in self.getOpponents(gameState):
-        belief = util.Counter()
         for state in self.particles[i]:
           belief[state] += 1
         belief.normalize()
         beliefs.append(belief)
       else:
-        beliefs.append(None)
-    return beliefs
+        belief[self.getCurrentObservation().getAgentPosition(i)] = 1
+        beliefs.append(belief)
+    self.beliefs = beliefs
+
+  def getMLP(self, gameState):
+    self.beliefMLP = []
+    for i in range(gameState.getNumAgents()):
+     self.beliefMLP.append(self.beliefs[i].argMax())
 
   def expectimax(self, gameState, depth, index):
     indexTable =[self.index]+self.getOpponents(gameState)
@@ -262,7 +251,7 @@ class ReflexCaptureAgent(CaptureAgent, object):
     # calculate next depth
     nextDepth = depth if not index == len(indexTable) - 1 else depth + 1
     # expectimax of all actions
-    expectimaxActions = [self.expectimax(gameState.generateSuccessor(agent, a), nextDepth, index+1) for a in actions]
+    expectimaxActions = [self.expectimax(self.getSuccessor(gameState, agent, a), nextDepth, index+1) for a in actions]
     # pacman (max state)
     if agent == self.index:
       # get index of action with max expectimax
@@ -282,48 +271,55 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
   we give you to get an idea of what an offensive agent might look like,
   but it is by no means the best or only way to build an offensive agent.
   """
-  def getFeatures(self, gameState, action):
+  def getFeatures(self, gameState):
     features = util.Counter()
-    successor = self.getSuccessor(gameState, action)
-    features['successorScore'] = self.getScore(successor)
+
+    features['score'] = self.getScore(gameState)
+
+    myPos = gameState.getAgentState(self.index).getPosition()
+
+    # get scared and not scared ghosts
+    nonScaredGhosts = []
+    scaredGhosts = []
+    for o in self.getOpponents(gameState):
+      if (not gameState.getAgentState(o).isPacman) and gameState.getAgentState(o).scaredTimer <= 0:
+        nonScaredGhosts.append(o)
+      elif (not gameState.getAgentState(o).isPacman) and gameState.getAgentState(o).scaredTimer > 0:
+        scaredGhosts.append(o)
 
     # Compute distance to the nearest food
-    foodList = self.getFood(successor).asList()
+    foodList = self.getFood(gameState).asList()
     if len(foodList) > 0: # This should always be True,  but better safe than sorry
-      myPos = successor.getAgentState(self.index).getPosition()
       minDistance = min([self.getMazeDistance(myPos, food) for food in foodList])
       features['distanceToFood'] = minDistance
     
     # food left
     features['foodLeft'] = len(foodList)
 
-    # distance to nearest not-scared ghost
-    enemies = [(i,successor.getAgentState(i)) for i in self.getOpponents(successor)]
-    ghosts = [(i, a) for i, a in enemies if (not a.isPacman) and a.scaredTimer <= 0]
-    if len(ghosts) > 0:
-      dists = [self.getMazeDistance(myPos, self.beliefMLP[i]) for i, a in ghosts]
+    # min distance to nearest not-scared ghost
+    if len(nonScaredGhosts) > 0:
+      dists = [self.getMazeDistance(myPos, gameState.getAgentState(o).getPosition()) for o in nonScaredGhosts]
       distanceToOpponent = min(dists)
       features['distanceToOpponent'] = float('-inf') if distanceToOpponent == 0 else 1.0/distanceToOpponent
 
     # number of power pellets
     powerPellets = None
     if self.red:
-      powerPellets = successor.getBlueCapsules()
+      powerPellets = gameState.getBlueCapsules()
     else:
-      powerPellets = successor.getRedCapsules()
+      powerPellets = gameState.getRedCapsules()
     features['powerPelletsLeft'] = len(powerPellets)
 
-    # distance to scared ghost
-    scaredGhosts = [(i, a) for i, a in enemies if (not a.isPacman) and a.scaredTimer > 0]
+    # min distance to scared ghost
     if len(scaredGhosts) > 0:
-      dists = [self.getMazeDistance(myPos, self.beliefMLP[i]) for i, a in scaredGhosts]
+      dists = [self.getMazeDistance(myPos, gameState.getAgentState(o).getPosition()) for o in scaredGhosts]
       distanceToGhost = min(dists)
       features['distanceToScared'] = distanceToGhost
     
     return features
 
-  def getWeights(self, gameState, action):
-    return {'successorScore': 100, 'distanceToFood': -4, 'distanceToOpponent':-5, 'foodLeft': -1, 'powerPelletsLeft': -100, 'distanceToScared': -1}
+  def getWeights(self, gameState):
+    return {'score': 100, 'distanceToFood': -3, 'distanceToOpponent':-5, 'foodLeft': -10, 'powerPelletsLeft': -100, 'distanceToScared': -1}
 
 
 class DefensiveReflexAgent(ReflexCaptureAgent):
@@ -334,9 +330,9 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
   such an agent.
   """
 
-  def getFeatures(self, gameState, action):
+  def getFeatures(self, gameState):
     features = util.Counter()
-    successor = self.getSuccessor(gameState, action)
+    successor = gameState
 
     myState = successor.getAgentState(self.index)
     myPos = myState.getPosition()
@@ -345,20 +341,20 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
     features['onDefense'] = 1
     if myState.isPacman: features['onDefense'] = 0
 
-    # Computes distance to invaders we can see
-    enemies = [(i,successor.getAgentState(i)) for i in self.getOpponents(successor)]
-    invaders = [(i, a) for i, a in enemies if a.isPacman]
+    # Computes distance to invaders
+    invaders = [o for o in self.getOpponents(gameState) if gameState.getAgentState(o).isPacman]
     features['numInvaders'] = len(invaders)
     if len(invaders) > 0:
-      dists = [self.getMazeDistance(myPos, self.beliefMLP[i]) for i, a in invaders]
+      dists = [self.getMazeDistance(myPos, gameState.getAgentState(o).getPosition()) for o in invaders]
       features['invaderDistance'] = min(dists)
-    if action == Directions.STOP: features['stop'] = 1
+
+    """ if action == Directions.STOP: features['stop'] = 1
     rev = Directions.REVERSE[gameState.getAgentState(self.index).configuration.direction]
-    if action == rev: features['reverse'] = 1
+    if action == rev: features['reverse'] = 1 """
 
     return features
 
-  def getWeights(self, gameState, action):
-    return {'numInvaders': -1000, 'onDefense': 100, 'invaderDistance': -200, 'stop': -100, 'reverse': -2}
+  def getWeights(self, gameState):
+    return {'numInvaders': -1000, 'onDefense': 100, 'invaderDistance': -50, 'stop': -20, 'reverse': -2}
 
 
