@@ -348,6 +348,18 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
       dists = [self.getMazeDistance(myPos, gameState.getAgentState(o).getPosition()) for o in invaders]
       features['invaderDistance'] = min(dists)
 
+    # avg dist to own food
+    foodList = self.getFoodYouAreDefending(successor).asList()
+    if len(foodList) > 0:
+      avg = float(sum([self.getMazeDistance(myPos, food) for food in foodList]))/float(len(foodList))
+      features['foodDist'] = avg
+
+    # min dist to own food pellet
+    pellets = self.getCapsulesYouAreDefending(successor)
+    if len(pellets) > 0:
+      dist = min([self.getMazeDistance(myPos, pellet) for pellet in pellets])
+      features['pelletDist'] = dist
+
     """ if action == Directions.STOP: features['stop'] = 1
     rev = Directions.REVERSE[gameState.getAgentState(self.index).configuration.direction]
     if action == rev: features['reverse'] = 1 """
@@ -355,6 +367,6 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
     return features
 
   def getWeights(self, gameState):
-    return {'numInvaders': -1000, 'onDefense': 100, 'invaderDistance': -50, 'stop': -20, 'reverse': -2}
+    return {'numInvaders': -1000, 'onDefense': 100, 'invaderDistance': -50, 'stop': -20, 'reverse': -2, 'foodDist': -1, 'pelletDist': -1}
 
 
