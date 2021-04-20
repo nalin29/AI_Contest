@@ -22,7 +22,7 @@ from util import nearestPoint
 #############
 
 NUM_KEYBOARD_AGENTS = 0
-class BaselineAgents(AgentFactory):
+class ExpectiAgents(AgentFactory):
   "Returns one keyboard agent and offensive reflex agents"
 
   def __init__(self, isRed, first='offense', second='defense', rest='offense'):
@@ -37,58 +37,26 @@ class BaselineAgents(AgentFactory):
       return self.choose(self.rest, index)
 
   def choose(self, agentStr, index):
-    if agentStr == 'keys':
-      global NUM_KEYBOARD_AGENTS
-      NUM_KEYBOARD_AGENTS += 1
-      if NUM_KEYBOARD_AGENTS == 1:
-        return keyboardAgents.KeyboardAgent(index)
-      elif NUM_KEYBOARD_AGENTS == 2:
-        return keyboardAgents.KeyboardAgent2(index)
-      else:
-        raise Exception('Max of two keyboard agents supported')
-    elif agentStr == 'offense':
-      return OffensiveReflexAgent(index)
+    if agentStr == 'offense':
+      return OffensiveExpectiAgent(index)
     elif agentStr == 'defense':
-      return DefensiveReflexAgent(index)
+      return DefensiveExpectiAgent(index)
     else:
-      raise Exception("No staff agent identified by " + agentStr)
-
-class AllOffenseAgents(AgentFactory):
-  "Returns one keyboard agent and offensive reflex agents"
-
-  def __init__(self, **args):
-    AgentFactory.__init__(self, **args)
-
-  def getAgent(self, index):
-    return OffensiveReflexAgent(index)
-
-class OffenseDefenseAgents(AgentFactory):
-  "Returns one keyboard agent and offensive reflex agents"
-
-  def __init__(self, **args):
-    AgentFactory.__init__(self, **args)
-    self.offense = False
-
-  def getAgent(self, index):
-    self.offense = not self.offense
-    if self.offense:
-      return OffensiveReflexAgent(index)
-    else:
-      return DefensiveReflexAgent(index)
+      raise Exception("No agent identified by " + agentStr)
 
 ##########
 # Agents #
 ##########
 
-class ReflexCaptureAgent(CaptureAgent, object):
+class ExpectiCaptureAgent(CaptureAgent, object):
   """
   A base class for reflex agents that chooses score-maximizing actions
   """
   def __init__(self, index, timeForComputing=0.1):
-      super(ReflexCaptureAgent, self).__init__(index, timeForComputing=timeForComputing)
+      super(ExpectiCaptureAgent, self).__init__(index, timeForComputing=timeForComputing)
 
   def registerInitialState(self, gameState):
-      super(ReflexCaptureAgent, self).registerInitialState(gameState)
+      super(ExpectiCaptureAgent, self).registerInitialState(gameState)
       # generate legal coordinates
       self.legalPos = []
       for x in range(gameState.data.layout.width):
@@ -265,7 +233,7 @@ class ReflexCaptureAgent(CaptureAgent, object):
     return float(sum(expectimaxActions))/float(len(expectimaxActions))
 
 
-class OffensiveReflexAgent(ReflexCaptureAgent):
+class OffensiveExpectiAgent(ExpectiCaptureAgent):
   """
   A reflex agent that seeks food. This is an agent
   we give you to get an idea of what an offensive agent might look like,
@@ -322,7 +290,7 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
     return {'score': 100, 'distanceToFood': -3, 'distanceToOpponent':-5, 'foodLeft': -10, 'powerPelletsLeft': -100, 'distanceToScared': -1}
 
 
-class DefensiveReflexAgent(ReflexCaptureAgent):
+class DefensiveExpectiAgent(ExpectiCaptureAgent):
   """
   A reflex agent that keeps its side Pacman-free. Again,
   this is to give you an idea of what a defensive agent
@@ -341,12 +309,25 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
     features['onDefense'] = 1
     if myState.isPacman: features['onDefense'] = 0
 
+    # non-invaders/invaders
+    invaders = []
+    nonInvaders = []
+    for i in self.getOpponents(successor): 
+      if successor.getAgentState(i).isPacman:
+        invaders.append(i)
+      else:
+        nonInvaders.append(i)
+
     # Computes distance to invaders
-    invaders = [o for o in self.getOpponents(gameState) if gameState.getAgentState(o).isPacman]
     features['numInvaders'] = len(invaders)
     if len(invaders) > 0:
       dists = [self.getMazeDistance(myPos, gameState.getAgentState(o).getPosition()) for o in invaders]
       features['invaderDistance'] = min(dists)
+    
+    # min dist to non-invader
+    if len(nonInvaders) > 0:
+      dists = [self.getMazeDistance(myPos, self.beliefMLP[i]) for i in nonInvaders]
+      features['nonInvaderDistance'] = min(dists)
 
     # avg dist to own food
     foodList = self.getFoodYouAreDefending(successor).asList()
@@ -367,6 +348,6 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
     return features
 
   def getWeights(self, gameState):
-    return {'numInvaders': -1000, 'onDefense': 100, 'invaderDistance': -50, 'stop': -20, 'reverse': -2, 'foodDist': -1, 'pelletDist': -1}
+    return {'numInvaders': -1000, 'onDefense': 100, 'invaderDistance': -50, 'stop': -20, 'reverse': -2, 'foodDist': -1, 'pelletDist': -1, 'nonInvaderDistance': -0.5}
 
 
